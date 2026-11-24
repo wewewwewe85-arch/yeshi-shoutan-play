@@ -111,7 +111,13 @@ function shape(piece) {
   return piece.vertical?{w:h,h:w}:{w,h};
 }
 function canTurn(id){return foods[id].w!==foods[id].h;}
-function turnTarget(pieces,piece,stage){
+const slidingStage=stage=>stage>=6;
+function oneCell(a,b){return Math.abs(a.col-b.col)+Math.abs(a.row-b.row)===1;}
+function overlaps(a,b){
+  const sa=shape(a),sb=shape(b);
+  return a.col<b.col+sb.w && b.col<a.col+sa.w && a.row<b.row+sb.h && b.row<a.row+sa.h;
+}
+function turnTarget(pieces,piece,stage,sliding=slidingStage(stage)){
   if(!canTurn(piece.id))return null;
   const turned={...piece,vertical:!piece.vertical};
   if(piece.col===null){
@@ -119,7 +125,8 @@ function turnTarget(pieces,piece,stage){
     return order && order.id===piece.id?turned:null;
   }
   if(stages[stage].orders.some(order=>order.id===piece.id))return null;
-  return nearestTurn(piece,legalOffers(pieces,turned,stage));
+  const choices=legalOffers(pieces,turned,stage);
+  return nearestTurn(piece,sliding?choices.filter(at=>overlaps(piece,at)):choices);
 }
 function contains(piece,col,row) {
   if(piece.col===null)return false;
@@ -154,6 +161,11 @@ function legalOffers(pieces,desired,stage=1) {
   }
   return result;
 }
+function canMove(pieces,at,stage,sliding=slidingStage(stage)){
+  if(!canPlace(pieces,at,stage))return false;
+  const from=pieces.find(p=>p.id===at.id);
+  return !sliding || from.col===null || (from.col===at.col && from.row===at.row) || oneCell(from,at);
+}
 function nearestTurn(current,choices) {
   const a=shape(current);
   let best=null,distance=Infinity;
@@ -179,12 +191,28 @@ function buildCatalog(stage) {
         poses.push({...at,mask:maskFor(at,spec.size),index:poses.length});
       }
     }
+    if(slidingStage(stage))for(const here of poses){
+      here.adjacent=poses.filter(next=>next.vertical===here.vertical && oneCell(here,next));
+      here.turns=poses.filter(next=>next.vertical!==here.vertical && (here.mask&next.mask));
+    }
     return poses;
   });
   const orders=spec.orders.map(o=>({...o,mask:maskFor(o,spec.size)}));
   const sealed=[0],remaining=[];
   for(const order of orders)sealed.push(sealed[sealed.length-1]|order.mask);
   for(const mask of sealed)remaining.push(sealed[sealed.length-1]^mask);
+  // Minimum single-piece travel to clear every delivery mat, ignoring the other
+  // foods. Allowing every overlapping turn here keeps this A* bound admissible.
+  if(slidingStage(stage))for(const poses of slots){
+    const queue=poses.filter(p=>!(p.mask&remaining[0]));
+    for(const p of poses)p.clearSteps=(p.mask&remaining[0])?Infinity:0;
+    for(let i=0;i<queue.length;i++){
+      const p=queue[i];
+      for(const q of p.adjacent.concat(p.turns))if(q.clearSteps===Infinity){
+        q.clearSteps=p.clearSteps+1;queue.push(q);
+      }
+    }
+  }
   return {slots,orders,sealed,remaining};
 }
 function insert(queue,item) {
@@ -210,7 +238,7 @@ function take(queue) {
   queue[i]=last;
   return next;
 }
-function plan(pieces,stage) {
+function plan(pieces,stage,sliding=slidingStage(stage)) {
   if(stage===1){
     const egg=pieces.find(p=>p.id==='eggs');
     if(egg.col!==null)return [];
@@ -240,7 +268,7 @@ function plan(pieces,stage) {
     for(let i=0;i<slots.length;i++)key=key*slots[i].length+state[i].index;
     if(best.has(key) && best.get(key)<=steps)return;
     best.set(key,steps);
-    const h=orders.length-n+state.reduce((v,s)=>v+Number(!!(s.mask&remaining[n])),0);
+    const h=orders.length-n+state.reduce((v,s)=>v+(sliding?s.clearSteps:Number(!!(s.mask&remaining[n]))),0);
     insert(queue,{state,n,key,parent,move,steps,rank:(steps+h)*256+h});
   }
   visit(state,filled,null,null);
@@ -267,8 +295,10 @@ function plan(pieces,stage) {
     if(!(occupied&order.mask))visit(now.state,now.n+1,now,order);
     for(let i=0;i<slots.length;i++){
       const here=now.state[i],others=occupied^here.mask;
-      const free=slots[i].filter(s=>s!==here && !(s.mask&others));
-      const rotated=canTurn(here.id)?nearestTurn(here,free.filter(s=>s.vertical!==here.vertical)):null;
+      const free=sliding?here.adjacent.filter(s=>!(s.mask&others)):slots[i].filter(s=>s!==here && !(s.mask&others));
+      const turns=sliding?here.turns.filter(s=>!(s.mask&others)):free.filter(s=>s.vertical!==here.vertical);
+      const rotated=canTurn(here.id)?nearestTurn(here,turns):null;
+      if(sliding && rotated)free.push(rotated);
       for(const next of free){
         if(next.vertical!==here.vertical && next!==rotated)continue;
         const changed=now.state.slice();changed[i]=next;
@@ -278,10 +308,10 @@ function plan(pieces,stage) {
   }
   return null;
 }
-module.exports={foods,stages,stageName,boardSize,start,openingOf,visibleOpening,allMoved,boardPosition,shape,canTurn,turnTarget,contains,canPlace,legalOffers,nearestTurn,activeOrder,plan};
+module.exports={foods,stages,stageName,boardSize,start,openingOf,visibleOpening,allMoved,boardPosition,shape,canTurn,turnTarget,contains,canPlace,canMove,oneCell,overlaps,slidingStage,legalOffers,nearestTurn,activeOrder,plan};
 })(levelModule,()=>stagesModule.exports);
 const openingsModule={exports:{}};
-(function(module){// Generated by qa/generate-openings.cjs. Each row is a solver-checked starting layout.
+(function(module){// Stages 1–5: original opening banks. Stages 6–10: qa/slide-depths.cjs.
 module.exports=[
   null,
   [ // 第一关 · 蛋盒入筐
@@ -475,282 +505,342 @@ module.exports=[
     [10,2,21,4,3]
   ],
   [ // 第六关 · 豆腐配玉米
-    [9,20,5,0],
-    [1,8,14,0],
-    [8,22,0,0],
-    [9,16,6,0],
-    [0,23,9,0],
-    [5,20,0,0],
-    [1,23,9,0],
-    [5,13,1,0],
-    [4,12,0,0],
-    [0,13,9,0],
-    [9,23,0,0],
-    [0,12,9,0],
-    [10,20,0,0],
-    [0,23,13,0],
-    [8,4,0,0],
-    [1,9,14,0],
-    [9,23,5,0],
-    [8,18,14,0],
-    [9,23,1,0],
-    [1,13,9,0],
-    [9,5,0,0],
-    [8,23,1,0],
-    [1,13,10,0],
-    [10,21,1,0],
-    [0,18,13,0],
-    [4,13,0,0],
-    [0,18,14,0],
-    [9,4,1,0],
-    [8,23,0,0],
-    [1,12,10,0],
-    [4,13,1,0],
-    [1,8,13,0],
-    [9,20,6,0],
-    [5,12,0,0],
-    [9,5,1,0],
-    [1,23,13,0],
+    [1,8,14,2],
+    [10,5,16,3],
+    [10,17,6,0],
+    [9,4,27,2],
+    [9,0,6,1],
+    [9,16,27,2],
+    [6,13,21,3],
+    [10,20,5,0],
+    [6,12,16,1],
+    [10,16,6,3],
+    [6,13,16,3],
+    [10,16,1,1],
+    [1,8,14,1],
+    [0,8,13,0],
+    [9,0,6,3],
+    [0,9,13,3],
+    [6,13,16,1],
+    [10,21,16,3],
+    [9,23,24,3],
+    [6,13,16,0],
+    [6,13,8,3],
+    [1,16,26,3],
+    [10,16,6,0],
+    [9,0,23,1],
+    [10,16,18,1],
+    [4,18,27,3],
+    [10,20,5,3],
+    [5,23,24,3],
+    [9,4,27,3],
+    [1,23,12,3],
+    [5,13,20,0],
     [9,16,5,0],
-    [0,12,10,0],
-    [8,4,1,0],
-    [1,9,13,0],
-    [8,5,0,0],
-    [0,13,6,0],
-    [9,20,0,0],
-    [0,12,6,0],
-    [10,20,1,0],
-    [1,23,8,0],
-    [9,20,1,0],
-    [0,23,8,0],
-    [8,5,1,0],
-    [9,4,0,0],
-    [0,22,8,0],
-    [5,13,0,0],
-    [1,12,9,0],
-    [8,23,5,0],
-    [5,12,1,0],
-    [0,13,10,0],
-    [8,22,1,0],
-    [10,21,0,0],
-    [4,12,1,0]
+    [0,23,12,0],
+    [9,0,6,0],
+    [4,18,27,2],
+    [10,5,16,2],
+    [4,0,26,0],
+    [9,23,24,2],
+    [10,20,5,1],
+    [4,23,13,2],
+    [8,4,14,1],
+    [9,16,17,1],
+    [6,12,16,0],
+    [9,16,27,1],
+    [10,16,18,0],
+    [10,17,6,3],
+    [1,16,27,0],
+    [10,20,17,3],
+    [1,9,13,1],
+    [0,18,14,1],
+    [1,16,26,0],
+    [8,0,27,2],
+    [10,20,5,2],
+    [5,23,24,2],
+    [8,18,14,1],
+    [5,12,20,1],
+    [1,23,12,0],
+    [8,0,27,0],
+    [9,0,23,2],
+    [0,9,13,1],
+    [9,16,17,3],
+    [6,12,17,0],
+    [9,16,27,3],
+    [6,12,8,1]
   ],
   [ // 第七关 · 蒸笼压轴
-    [1,9,13,0],
-    [1,9,13,2],
-    [1,9,12,1],
-    [1,9,12,3],
-    [1,9,12,0],
-    [1,9,12,2],
-    [1,9,13,1],
-    [1,9,13,3]
+    [4,12,1,1],
+    [1,23,25,1],
+    [6,12,4,2],
+    [2,12,4,0],
+    [6,12,4,1],
+    [1,13,8,1],
+    [1,12,8,2],
+    [1,12,19,1],
+    [6,12,4,3],
+    [2,13,20,0],
+    [2,13,17,2],
+    [1,13,8,0],
+    [4,13,1,1],
+    [2,12,20,3],
+    [4,13,18,3],
+    [2,20,17,1],
+    [6,13,8,0],
+    [1,23,25,0],
+    [5,13,20,3],
+    [4,13,19,1],
+    [5,13,20,2],
+    [2,13,17,1],
+    [1,12,8,3],
+    [4,13,18,0],
+    [1,13,24,2],
+    [2,12,21,1],
+    [1,23,25,3],
+    [2,13,4,1],
+    [4,13,1,2],
+    [1,20,19,3],
+    [6,13,21,0],
+    [2,13,17,3],
+    [2,13,20,1],
+    [2,12,17,2],
+    [4,12,19,3],
+    [2,13,4,3],
+    [2,12,21,0],
+    [1,23,25,2],
+    [1,20,19,0],
+    [1,20,19,2],
+    [5,13,20,0],
+    [1,13,8,3],
+    [2,12,20,1],
+    [6,13,4,3],
+    [6,13,4,0],
+    [1,13,19,3],
+    [6,12,4,0],
+    [2,13,4,2],
+    [1,12,19,0],
+    [2,12,20,2],
+    [5,12,20,3],
+    [2,13,4,0],
+    [4,13,19,3],
+    [1,13,8,2],
+    [5,12,20,1],
+    [1,13,19,2],
+    [1,12,8,1],
+    [5,12,20,0],
+    [6,12,8,1],
+    [4,13,1,3],
+    [4,13,18,2],
+    [1,12,19,2],
+    [2,20,17,3],
+    [1,12,19,3]
   ],
   [ // 第八关 · 鱼档搭串
-    [12,15,6,0,0],
-    [15,12,1,5,0],
-    [12,3,0,20,0],
-    [13,11,1,21,0],
-    [15,13,6,0,0],
-    [16,6,33,1,0],
-    [11,13,0,6,0],
-    [15,12,6,1,0],
+    [3,12,5,39,1],
+    [15,0,2,33,0],
+    [0,12,20,7,0],
+    [0,11,20,2,2],
+    [0,16,2,32,0],
+    [11,1,28,20,0],
+    [13,0,32,28,2],
+    [11,1,33,34,2],
+    [11,0,20,2,1],
+    [2,12,20,31,2],
+    [13,0,37,7,2],
+    [2,11,34,40,3],
+    [13,0,20,2,3],
+    [2,12,31,40,2],
+    [16,1,33,39,0],
+    [1,13,20,28,0],
+    [11,1,34,38,3],
+    [12,3,20,36,0],
+    [11,1,33,40,0],
+    [16,0,28,29,2],
+    [13,2,15,20,0],
+    [1,16,29,40,1],
+    [11,1,20,28,0],
+    [0,15,2,8,1],
+    [8,6,20,3,1],
+    [6,13,15,29,0],
+    [0,12,34,27,2],
+    [13,1,36,8,2],
+    [1,11,33,34,0],
+    [16,0,2,13,0],
+    [2,12,20,31,1],
+    [12,3,36,40,3],
+    [1,11,33,40,1],
+    [13,3,37,41,3],
+    [8,6,15,2,3],
+    [12,0,34,7,0],
+    [6,13,20,29,0],
+    [0,16,27,33,0],
+    [16,0,2,32,3],
+    [0,16,27,38,3],
+    [0,16,34,3,1],
+    [0,11,29,28,3],
+    [0,12,34,7,1],
+    [2,13,20,29,0],
+    [16,1,34,40,1],
+    [2,12,31,40,0],
+    [11,2,29,40,1],
+    [1,11,29,38,3],
+    [11,0,20,2,2],
+    [13,2,26,37,0],
+    [16,0,2,40,1],
+    [1,16,29,40,0],
+    [1,13,20,3,2],
+    [3,13,37,40,1],
+    [13,1,36,8,0],
+    [2,13,31,21,1],
+    [16,0,27,39,0],
+    [11,0,29,28,3],
+    [13,3,32,15,0],
     [11,1,33,20,0],
-    [15,12,34,1,0],
-    [16,13,1,6,0],
-    [12,15,29,1,0],
-    [13,3,36,0,0],
-    [11,13,6,20,0],
-    [13,15,1,5,0],
-    [1,12,36,3,0],
-    [13,11,5,1,0],
-    [12,3,36,6,0],
-    [15,12,26,7,0],
-    [12,3,36,5,0],
-    [13,11,6,20,0],
-    [6,13,0,3,0],
-    [1,12,36,8,0],
-    [16,7,34,1,0],
-    [12,3,0,21,0],
-    [15,6,34,1,0],
-    [3,12,5,21,0],
-    [6,16,34,1,0],
-    [3,12,0,21,0],
-    [13,15,1,6,0],
-    [15,7,34,1,0],
-    [13,11,0,21,0],
-    [12,15,29,6,0],
-    [16,13,6,1,0],
-    [12,1,36,8,0],
-    [3,12,26,21,0],
-    [12,3,36,1,0],
-    [15,12,29,6,0],
-    [12,3,5,21,0],
-    [3,12,31,0,0],
-    [11,13,0,21,0],
-    [13,1,36,3,0],
-    [11,13,5,1,0],
-    [13,16,1,5,0],
-    [11,13,0,20,0],
-    [13,3,36,5,0],
-    [16,13,26,7,0],
-    [15,12,34,6,0],
-    [12,3,26,21,0],
-    [11,13,5,20,0],
-    [13,3,36,6,0],
-    [12,15,26,7,0],
-    [1,13,36,3,0],
-    [12,15,34,6,0],
-    [11,13,5,21,0],
-    [12,15,34,1,0],
-    [15,12,6,0,0],
-    [11,13,1,20,0],
-    [13,11,6,1,0],
-    [3,12,26,20,0],
-    [12,1,34,3,0],
-    [11,13,2,6,0],
-    [7,16,34,1,0],
-    [16,13,1,5,0]
+    [16,0,2,13,1],
+    [13,2,37,31,3],
+    [11,2,29,20,1],
+    [1,16,34,40,3]
   ],
   [ // 第九关 · 三家拼单
-    [6,16,35,13,0],
-    [13,6,25,21,0],
-    [16,13,30,7,0],
-    [13,6,35,8,0],
-    [6,13,30,22,0],
-    [8,17,36,6,0],
-    [6,16,30,18,0],
-    [7,18,35,5,0],
-    [16,6,30,18,0],
-    [18,7,25,16,0],
-    [6,18,30,13,0],
-    [11,13,35,6,0],
-    [6,18,25,15,0],
-    [16,8,30,18,0],
-    [18,11,35,6,0],
-    [6,13,25,16,0],
-    [7,18,31,0,0],
-    [8,6,35,18,0],
-    [6,16,25,13,0],
-    [11,13,35,7,0],
-    [18,8,31,21,0],
-    [13,6,30,22,0],
-    [18,11,35,7,0],
-    [7,18,31,21,0],
-    [8,16,30,23,0],
-    [7,18,26,21,0],
-    [16,8,35,5,0],
-    [6,16,25,18,0],
-    [11,18,35,7,0],
-    [13,6,30,8,0],
-    [18,8,35,16,0],
-    [16,6,30,13,0],
-    [6,16,35,18,0],
-    [18,7,31,0,0],
-    [8,6,30,16,0],
-    [13,16,35,6,0],
-    [6,18,30,21,0],
-    [16,6,25,13,0],
-    [7,18,36,5,0],
-    [8,6,25,21,0],
-    [6,8,30,16,0],
-    [8,16,35,18,0],
-    [6,18,25,21,0],
-    [18,16,30,7,0],
-    [11,8,35,6,0],
-    [7,18,30,0,0],
-    [8,16,35,5,0],
-    [7,18,25,21,0],
-    [8,6,35,17,0],
-    [18,7,36,5,0],
-    [6,8,30,0,0],
-    [18,7,25,21,0],
-    [16,8,30,6,0],
-    [18,7,35,16,0],
-    [6,18,30,8,0],
-    [13,6,35,0,0],
-    [18,8,30,6,0],
-    [6,18,35,16,0],
-    [16,13,30,6,0],
-    [7,18,25,16,0],
-    [13,6,30,0,0],
-    [11,8,35,18,0],
-    [7,18,36,0,0],
-    [18,8,30,21,0]
+    [10,0,22,34,1],
+    [7,17,36,44,3],
+    [17,7,31,39,0],
+    [17,0,36,34,3],
+    [18,8,20,32,2],
+    [0,10,21,34,3],
+    [0,15,17,34,2],
+    [12,0,35,34,1],
+    [16,7,35,39,2],
+    [6,16,30,13,2],
+    [0,10,20,34,2],
+    [0,15,17,34,3],
+    [7,17,36,44,2],
+    [0,11,21,13,0],
+    [16,6,30,34,1],
+    [0,7,36,39,1],
+    [16,0,35,13,2],
+    [0,15,38,34,2],
+    [10,0,22,34,3],
+    [7,17,31,34,1],
+    [0,17,35,34,2],
+    [6,18,20,34,1],
+    [6,17,35,13,0],
+    [6,18,35,34,2],
+    [7,17,31,39,2],
+    [10,0,17,8,1],
+    [11,0,20,13,3],
+    [17,6,30,34,1],
+    [16,0,35,13,1],
+    [7,17,31,39,0],
+    [8,17,31,44,3],
+    [7,18,30,34,0],
+    [0,11,35,13,3],
+    [18,0,35,8,1],
+    [8,18,20,32,1],
+    [0,11,35,39,1],
+    [0,16,35,13,0],
+    [17,0,35,13,1],
+    [12,0,20,34,0],
+    [16,6,30,13,1],
+    [15,0,10,34,1],
+    [16,6,30,39,0],
+    [0,15,10,34,1],
+    [7,0,20,39,0],
+    [7,0,36,39,3],
+    [6,18,20,34,3],
+    [18,7,26,34,1],
+    [7,0,35,39,1],
+    [11,0,35,39,3],
+    [0,11,20,13,3],
+    [17,6,30,39,2],
+    [11,0,35,39,0],
+    [15,0,22,39,2],
+    [0,12,20,34,1],
+    [17,7,30,34,0],
+    [6,17,25,39,1],
+    [0,7,21,34,0],
+    [0,17,35,13,1],
+    [0,15,17,34,0],
+    [7,17,30,34,3],
+    [17,8,35,44,3],
+    [18,7,30,34,1],
+    [7,17,30,39,2],
+    [0,10,17,8,2]
   ],
   [ // 第十关 · 打烊大单
-    [13,32,1,9,0],
-    [13,37,1,8,2],
-    [13,37,7,9,0],
-    [13,31,22,9,1],
-    [13,36,22,9,2],
-    [13,31,22,9,0],
-    [13,37,15,9,3],
-    [0,34,12,2,0],
-    [13,37,15,9,2],
-    [13,36,22,9,0],
-    [13,32,15,9,1],
-    [13,36,6,9,2],
-    [13,31,2,8,0],
-    [13,37,7,9,3],
-    [13,36,22,8,2],
-    [13,31,22,8,0],
-    [13,37,7,9,1],
-    [13,32,1,8,0],
-    [13,37,1,9,1],
-    [13,36,5,9,0],
-    [0,34,12,17,3],
-    [13,36,5,9,1],
-    [0,34,12,17,0],
-    [13,31,22,8,3],
-    [13,32,21,9,0],
-    [13,37,1,8,3],
-    [13,32,1,8,2],
-    [13,31,2,9,0],
-    [13,31,2,8,3],
-    [13,32,2,9,2],
-    [13,37,15,9,1],
-    [13,36,5,9,2],
-    [13,36,5,9,3],
-    [13,31,2,9,1],
-    [13,32,15,9,0],
-    [13,31,2,8,2],
-    [13,31,2,8,1],
-    [13,36,7,9,0],
-    [0,34,12,2,3],
-    [13,32,5,9,2],
-    [13,36,6,9,1],
-    [13,37,6,8,2],
-    [13,36,7,9,1],
-    [13,36,6,9,3],
-    [13,31,21,9,2],
-    [13,37,6,8,3],
-    [13,32,2,9,0],
-    [13,31,22,9,3],
-    [13,37,1,8,1],
-    [0,34,12,17,2],
-    [13,36,6,9,0],
-    [13,32,21,9,2],
-    [13,37,15,8,3],
-    [13,37,6,8,1],
-    [13,32,15,9,3],
-    [13,37,15,9,0],
-    [13,37,1,9,3],
-    [13,32,1,9,2],
-    [13,36,22,8,3],
-    [13,32,1,9,1],
-    [0,34,12,2,2],
-    [0,34,12,17,1],
-    [13,36,1,9,0],
-    [13,36,1,9,3]
+    [10,21,32,0,1],
+    [10,38,42,1,0],
+    [10,12,21,0,1],
+    [10,33,42,0,0],
+    [10,17,7,0,1],
+    [10,38,42,5,2],
+    [10,17,21,0,1],
+    [10,12,42,0,0],
+    [10,32,21,0,2],
+    [10,21,6,0,3],
+    [16,38,32,0,2],
+    [10,17,21,0,0],
+    [10,21,6,0,2],
+    [10,38,32,0,1],
+    [10,21,27,0,2],
+    [10,21,27,0,1],
+    [10,38,21,0,0],
+    [10,33,42,0,2],
+    [5,17,41,0,3],
+    [10,21,6,0,0],
+    [10,38,37,0,2],
+    [10,21,7,0,1],
+    [10,28,21,0,3],
+    [5,12,21,0,2],
+    [10,21,12,0,3],
+    [5,38,41,0,2],
+    [10,34,21,0,3],
+    [10,17,21,5,2],
+    [10,38,21,0,3],
+    [10,38,42,0,1],
+    [5,37,41,0,2],
+    [5,12,21,0,1],
+    [16,38,11,0,2],
+    [10,21,27,0,3],
+    [10,17,12,0,1],
+    [10,17,21,5,3],
+    [10,12,42,0,1],
+    [5,12,21,0,0],
+    [10,38,21,0,1],
+    [10,21,7,0,3],
+    [10,33,21,0,0],
+    [10,12,21,0,3],
+    [10,28,21,0,2],
+    [5,21,15,0,3],
+    [10,38,7,0,2],
+    [10,38,21,1,3],
+    [10,34,21,0,1],
+    [10,29,21,0,0],
+    [5,38,41,0,3],
+    [16,38,11,0,1],
+    [10,17,21,5,1],
+    [10,38,21,1,0],
+    [10,17,21,0,3],
+    [10,21,32,0,0],
+    [11,21,35,0,2],
+    [5,12,21,0,3],
+    [5,21,15,0,2],
+    [10,38,42,1,1],
+    [10,38,37,0,3],
+    [10,33,21,0,1],
+    [10,38,7,0,0],
+    [10,21,32,0,2],
+    [10,38,32,0,0],
+    [10,38,42,5,3]
   ]
 ];
-// Prior deals are retained to migrate in-progress games and choose a different next deal.
-module.exports.previous={"2":[[4,0,10,3,0],[5,19,13,12,0],[10,0,5,3,0],[4,1,10,7,0],[8,18,0,3,0],[9,1,4,11,0],[5,0,14,13,0],[6,1,4,14,0],[5,0,14,12,0],[8,1,10,14,0],[0,23,8,3,0],[9,4,2,7,0],[0,18,8,13,0],[4,23,13,2,0],[6,0,4,3,0],[1,8,14,7,0],[0,23,13,12,0],[6,0,8,3,0],[9,19,1,8,0],[10,0,6,3,0],[4,12,1,10,0],[0,18,13,9,0],[10,0,5,4,0],[4,22,0,15,0],[9,19,1,12,0],[0,9,12,2,0],[1,20,10,13,0],[2,8,14,4,0],[4,18,12,0,0],[5,23,1,4,0],[4,18,0,13,0],[8,23,2,6,0],[6,16,14,1,0],[0,22,8,12,0],[1,8,12,4,0],[9,0,5,15,0],[0,23,12,8,0],[10,1,5,7,0],[6,20,14,13,0],[4,0,10,6,0],[9,23,0,3,0],[6,20,14,9,0],[9,0,5,4,0],[6,17,14,0,0],[1,16,9,13,0],[9,5,0,15,0],[0,23,8,6,0],[8,18,4,11,0],[1,12,8,10,0],[5,1,13,11,0],[9,20,1,0,0],[0,12,8,10,0],[9,5,1,15,0],[2,20,14,5,0],[1,16,9,11,0],[8,22,2,7,0],[10,1,6,5,0],[9,5,1,4,0],[5,16,14,11,0],[1,20,10,9,0],[6,0,4,14,0],[9,4,0,11,0],[5,0,14,8,0],[6,1,4,0,0]],"3":[[2,16,9,5,0],[5,23,13,1,0],[9,4,2,8,0],[0,8,6,11,0],[6,16,14,2,0],[1,23,9,0,0],[0,18,8,3,0],[2,16,13,11,0],[10,4,2,0,0],[2,16,10,9,0],[0,18,13,8,0],[5,13,2,11,0],[1,23,13,8,0],[4,22,0,13,0],[6,16,13,2,0],[9,23,0,4,0],[1,9,13,0,0],[9,19,4,6,0],[1,13,9,7,0],[10,4,2,1,0],[1,19,13,10,0],[0,13,9,6,0],[1,9,14,0,0],[10,16,5,2,0],[4,22,2,15,0],[9,23,4,2,0],[1,8,14,13,0],[5,19,13,4,0],[4,22,0,2,0],[1,23,8,0,0],[6,1,4,9,0],[0,8,6,15,0],[6,17,2,0,0],[1,13,8,7,0],[4,23,0,10,0],[10,5,2,1,0],[2,16,14,5,0],[4,19,1,15,0],[0,8,14,11,0],[4,22,1,13,0],[9,19,4,2,0],[2,16,13,5,0],[0,9,6,2,0],[10,16,2,7,0],[1,8,14,3,0],[6,13,8,2,0],[4,23,2,1,0],[2,17,13,11,0],[1,13,10,7,0],[6,16,1,15,0],[10,5,8,1,0],[1,8,13,0,0],[6,16,1,3,0],[5,23,2,4,0],[2,16,9,1,0],[1,19,14,10,0],[5,23,1,4,0],[9,16,2,5,0],[0,9,14,7,0],[6,13,1,9,0],[10,5,2,0,0],[0,23,13,8,0],[1,16,14,13,0],[9,5,1,4,0]]};
+module.exports.previous={"2":[[4,0,10,3,0],[5,19,13,12,0],[10,0,5,3,0],[4,1,10,7,0],[8,18,0,3,0],[9,1,4,11,0],[5,0,14,13,0],[6,1,4,14,0],[5,0,14,12,0],[8,1,10,14,0],[0,23,8,3,0],[9,4,2,7,0],[0,18,8,13,0],[4,23,13,2,0],[6,0,4,3,0],[1,8,14,7,0],[0,23,13,12,0],[6,0,8,3,0],[9,19,1,8,0],[10,0,6,3,0],[4,12,1,10,0],[0,18,13,9,0],[10,0,5,4,0],[4,22,0,15,0],[9,19,1,12,0],[0,9,12,2,0],[1,20,10,13,0],[2,8,14,4,0],[4,18,12,0,0],[5,23,1,4,0],[4,18,0,13,0],[8,23,2,6,0],[6,16,14,1,0],[0,22,8,12,0],[1,8,12,4,0],[9,0,5,15,0],[0,23,12,8,0],[10,1,5,7,0],[6,20,14,13,0],[4,0,10,6,0],[9,23,0,3,0],[6,20,14,9,0],[9,0,5,4,0],[6,17,14,0,0],[1,16,9,13,0],[9,5,0,15,0],[0,23,8,6,0],[8,18,4,11,0],[1,12,8,10,0],[5,1,13,11,0],[9,20,1,0,0],[0,12,8,10,0],[9,5,1,15,0],[2,20,14,5,0],[1,16,9,11,0],[8,22,2,7,0],[10,1,6,5,0],[9,5,1,4,0],[5,16,14,11,0],[1,20,10,9,0],[6,0,4,14,0],[9,4,0,11,0],[5,0,14,8,0],[6,1,4,0,0]],"3":[[2,16,9,5,0],[5,23,13,1,0],[9,4,2,8,0],[0,8,6,11,0],[6,16,14,2,0],[1,23,9,0,0],[0,18,8,3,0],[2,16,13,11,0],[10,4,2,0,0],[2,16,10,9,0],[0,18,13,8,0],[5,13,2,11,0],[1,23,13,8,0],[4,22,0,13,0],[6,16,13,2,0],[9,23,0,4,0],[1,9,13,0,0],[9,19,4,6,0],[1,13,9,7,0],[10,4,2,1,0],[1,19,13,10,0],[0,13,9,6,0],[1,9,14,0,0],[10,16,5,2,0],[4,22,2,15,0],[9,23,4,2,0],[1,8,14,13,0],[5,19,13,4,0],[4,22,0,2,0],[1,23,8,0,0],[6,1,4,9,0],[0,8,6,15,0],[6,17,2,0,0],[1,13,8,7,0],[4,23,0,10,0],[10,5,2,1,0],[2,16,14,5,0],[4,19,1,15,0],[0,8,14,11,0],[4,22,1,13,0],[9,19,4,2,0],[2,16,13,5,0],[0,9,6,2,0],[10,16,2,7,0],[1,8,14,3,0],[6,13,8,2,0],[4,23,2,1,0],[2,17,13,11,0],[1,13,10,7,0],[6,16,1,15,0],[10,5,8,1,0],[1,8,13,0,0],[6,16,1,3,0],[5,23,2,4,0],[2,16,9,1,0],[1,19,14,10,0],[5,23,1,4,0],[9,16,2,5,0],[0,9,14,7,0],[6,13,1,9,0],[10,5,2,0,0],[0,23,13,8,0],[1,16,14,13,0],[9,5,1,4,0]],"6":[[9,20,5,0],[1,8,14,0],[8,22,0,0],[9,16,6,0],[0,23,9,0],[5,20,0,0],[1,23,9,0],[5,13,1,0],[4,12,0,0],[0,13,9,0],[9,23,0,0],[0,12,9,0],[10,20,0,0],[0,23,13,0],[8,4,0,0],[1,9,14,0],[9,23,5,0],[8,18,14,0],[9,23,1,0],[1,13,9,0],[9,5,0,0],[8,23,1,0],[1,13,10,0],[10,21,1,0],[0,18,13,0],[4,13,0,0],[0,18,14,0],[9,4,1,0],[8,23,0,0],[1,12,10,0],[4,13,1,0],[1,8,13,0],[9,20,6,0],[5,12,0,0],[9,5,1,0],[1,23,13,0],[9,16,5,0],[0,12,10,0],[8,4,1,0],[1,9,13,0],[8,5,0,0],[0,13,6,0],[9,20,0,0],[0,12,6,0],[10,20,1,0],[1,23,8,0],[9,20,1,0],[0,23,8,0],[8,5,1,0],[9,4,0,0],[0,22,8,0],[5,13,0,0],[1,12,9,0],[8,23,5,0],[5,12,1,0],[0,13,10,0],[8,22,1,0],[10,21,0,0],[4,12,1,0]],"7":[[1,9,13,0],[1,9,13,2],[1,9,12,1],[1,9,12,3],[1,9,12,0],[1,9,12,2],[1,9,13,1],[1,9,13,3]],"8":[[12,15,6,0,0],[15,12,1,5,0],[12,3,0,20,0],[13,11,1,21,0],[15,13,6,0,0],[16,6,33,1,0],[11,13,0,6,0],[15,12,6,1,0],[11,1,33,20,0],[15,12,34,1,0],[16,13,1,6,0],[12,15,29,1,0],[13,3,36,0,0],[11,13,6,20,0],[13,15,1,5,0],[1,12,36,3,0],[13,11,5,1,0],[12,3,36,6,0],[15,12,26,7,0],[12,3,36,5,0],[13,11,6,20,0],[6,13,0,3,0],[1,12,36,8,0],[16,7,34,1,0],[12,3,0,21,0],[15,6,34,1,0],[3,12,5,21,0],[6,16,34,1,0],[3,12,0,21,0],[13,15,1,6,0],[15,7,34,1,0],[13,11,0,21,0],[12,15,29,6,0],[16,13,6,1,0],[12,1,36,8,0],[3,12,26,21,0],[12,3,36,1,0],[15,12,29,6,0],[12,3,5,21,0],[3,12,31,0,0],[11,13,0,21,0],[13,1,36,3,0],[11,13,5,1,0],[13,16,1,5,0],[11,13,0,20,0],[13,3,36,5,0],[16,13,26,7,0],[15,12,34,6,0],[12,3,26,21,0],[11,13,5,20,0],[13,3,36,6,0],[12,15,26,7,0],[1,13,36,3,0],[12,15,34,6,0],[11,13,5,21,0],[12,15,34,1,0],[15,12,6,0,0],[11,13,1,20,0],[13,11,6,1,0],[3,12,26,20,0],[12,1,34,3,0],[11,13,2,6,0],[7,16,34,1,0],[16,13,1,5,0]],"9":[[6,16,35,13,0],[13,6,25,21,0],[16,13,30,7,0],[13,6,35,8,0],[6,13,30,22,0],[8,17,36,6,0],[6,16,30,18,0],[7,18,35,5,0],[16,6,30,18,0],[18,7,25,16,0],[6,18,30,13,0],[11,13,35,6,0],[6,18,25,15,0],[16,8,30,18,0],[18,11,35,6,0],[6,13,25,16,0],[7,18,31,0,0],[8,6,35,18,0],[6,16,25,13,0],[11,13,35,7,0],[18,8,31,21,0],[13,6,30,22,0],[18,11,35,7,0],[7,18,31,21,0],[8,16,30,23,0],[7,18,26,21,0],[16,8,35,5,0],[6,16,25,18,0],[11,18,35,7,0],[13,6,30,8,0],[18,8,35,16,0],[16,6,30,13,0],[6,16,35,18,0],[18,7,31,0,0],[8,6,30,16,0],[13,16,35,6,0],[6,18,30,21,0],[16,6,25,13,0],[7,18,36,5,0],[8,6,25,21,0],[6,8,30,16,0],[8,16,35,18,0],[6,18,25,21,0],[18,16,30,7,0],[11,8,35,6,0],[7,18,30,0,0],[8,16,35,5,0],[7,18,25,21,0],[8,6,35,17,0],[18,7,36,5,0],[6,8,30,0,0],[18,7,25,21,0],[16,8,30,6,0],[18,7,35,16,0],[6,18,30,8,0],[13,6,35,0,0],[18,8,30,6,0],[6,18,35,16,0],[16,13,30,6,0],[7,18,25,16,0],[13,6,30,0,0],[11,8,35,18,0],[7,18,36,0,0],[18,8,30,21,0]],"10":[[13,32,1,9,0],[13,37,1,8,2],[13,37,7,9,0],[13,31,22,9,1],[13,36,22,9,2],[13,31,22,9,0],[13,37,15,9,3],[0,34,12,2,0],[13,37,15,9,2],[13,36,22,9,0],[13,32,15,9,1],[13,36,6,9,2],[13,31,2,8,0],[13,37,7,9,3],[13,36,22,8,2],[13,31,22,8,0],[13,37,7,9,1],[13,32,1,8,0],[13,37,1,9,1],[13,36,5,9,0],[0,34,12,17,3],[13,36,5,9,1],[0,34,12,17,0],[13,31,22,8,3],[13,32,21,9,0],[13,37,1,8,3],[13,32,1,8,2],[13,31,2,9,0],[13,31,2,8,3],[13,32,2,9,2],[13,37,15,9,1],[13,36,5,9,2],[13,36,5,9,3],[13,31,2,9,1],[13,32,15,9,0],[13,31,2,8,2],[13,31,2,8,1],[13,36,7,9,0],[0,34,12,2,3],[13,32,5,9,2],[13,36,6,9,1],[13,37,6,8,2],[13,36,7,9,1],[13,36,6,9,3],[13,31,21,9,2],[13,37,6,8,3],[13,32,2,9,0],[13,31,22,9,3],[13,37,1,8,1],[0,34,12,17,2],[13,36,6,9,0],[13,32,21,9,2],[13,37,15,8,3],[13,37,6,8,1],[13,32,15,9,3],[13,37,15,9,0],[13,37,1,9,3],[13,32,1,9,2],[13,36,22,8,3],[13,32,1,9,1],[0,34,12,2,2],[0,34,12,17,1],[13,36,1,9,0],[13,36,1,9,3]]};
 })(openingsModule);
 const dealsModule={exports:{}};
 (function(module,require){'use strict';
 const banks=require('./openings');
-const {allMoved}=require('./level');
+const {allMoved,start,openingOf}=require('./level');
 
 function indexOfOpening(stage,opening){
   if(!Array.isArray(opening))return -1;
@@ -758,12 +848,18 @@ function indexOfOpening(stage,opening){
 }
 function openingAt(stage,index){return banks[stage][index];}
 function oldOpening(stage,opening){
+  if(!Array.isArray(opening))return null;
   const previous=banks.previous[stage];
-  return previous && Array.isArray(opening) && previous.find(row=>row.length===opening.length && row.every((v,i)=>v===opening[i]));
+  const matches=row=>row.length===opening.length && row.every((v,i)=>v===opening[i]);
+  const old=previous && previous.find(matches);
+  if(old)return old;
+  const original=openingOf(start(stage),stage);
+  return matches(original)?original:null;
 }
 function restoreDraw(stage,draw,version){
   const old=banks.previous[stage];
-  if(version!==2 && old && Number.isInteger(draw.last) && old[draw.last])return {from:old[draw.last]};
+  const changed=stage>=6?version!==3:(stage===2 || stage===3) && version!==2 && version!==3;
+  if(changed && old && Number.isInteger(draw.last) && old[draw.last])return {from:old[draw.last]};
   return draw;
 }
 
@@ -837,10 +933,17 @@ function createMarket(host, art) {
   let stage=validStage(host.initialStage)?host.initialStage:stored&&validStage(stored.stage)?stored.stage:1;
   let home=!validStage(host.initialStage);
   let hasStarted=!home || !!(stored && validStage(stored.stage));
-  const best={};
+  const best={},oldBest={};
   if(stored && stored.best)for(let n=1;n<=lastStage;n++){
-    const steps=stored.best[n];if(Number.isSafeInteger(steps)&&steps>0)best[n]=steps;
+    const steps=stored.best[n];
+    if(Number.isSafeInteger(steps)&&steps>0){
+      const records=level.slidingStage(n) && stored.openingSet!==3?oldBest:best;
+      records[n]=steps;
+    }
+    const oldSteps=stored.oldBest && stored.oldBest[n];
+    if(level.slidingStage(n) && Number.isSafeInteger(oldSteps)&&oldSteps>0)oldBest[n]=oldSteps;
   }
+  const completedCount=()=>Object.keys({...oldBest,...best}).length;
   const draws={};
   if(stored && stored.draws)for(let n=1;n<=lastStage;n++){
     if(stored.draws[n])draws[n]=deals.restoreDraw(n,stored.draws[n],stored.openingSet);
@@ -858,6 +961,7 @@ function createMarket(host, art) {
     }
   }
   const resumeSaved=home && stored && stored.stage===stage && savedStart;
+  let sliding=level.slidingStage(stage) && !(resumeSaved && (stored.openingSet!==3 || stored.freePlacement));
   let opening=resumeSaved?savedStart:deals.openingAt(stage,0);
   let pieces=level.start(stage,opening), selection=null, gesture=null, flight=null, notice=null, noticeTimer=null, won=false;
   let hintMark=null,book=false,history=[];
@@ -868,7 +972,7 @@ function createMarket(host, art) {
   const get=id=>pieces.find(p=>p.id===id);
   const boardPosition=(col,row,w,h)=>level.boardPosition(col,row,w,h,level.boardSize(stage),opening[spec().layout.length]);
   function persist(){
-    if(host.save)host.save({stage,best,opening,openingSet:2,draws,moves:history.map(step=>step.after)});
+    if(host.save)host.save({stage,best,oldBest,opening,openingSet:3,freePlacement:level.slidingStage(stage)&&!sliding,draws,moves:history.map(step=>step.after)});
   }
   function remember(at) {
     const piece=get(at.id),after={id:piece.id,col:at.col,row:at.row,vertical:at.vertical};
@@ -880,9 +984,9 @@ function createMarket(host, art) {
       if(won || !at || !get(at.id) || typeof at.vertical!=='boolean')break;
       const current=get(at.id);
       if(at.vertical!==current.vertical){
-        const rotated=level.turnTarget(pieces,current,stage);
+        const rotated=level.turnTarget(pieces,current,stage,sliding);
         if(!rotated || rotated.col!==at.col || rotated.row!==at.row)break;
-      }else if(!level.canPlace(pieces,at,stage))break;
+      }else if(!level.canMove(pieces,at,stage,sliding))break;
       remember(at);
     }
   }
@@ -962,12 +1066,12 @@ function createMarket(host, art) {
     if(!won)return stage;
     for(let offset=1;offset<=lastStage;offset++){
       const n=(stage-1+offset)%lastStage+1;
-      if(!best[n])return n;
+      if(!best[n] && !oldBest[n])return n;
     }
     return stage;
   }
   function startLabel(){
-    if(won)return Object.keys(best).length===lastStage?'再玩一局':'前往下一关';
+    if(won)return completedCount()===lastStage?'再玩一局':'前往下一关';
     if(history.length)return '继续收摊';
     return hasStarted?'重新开局':'开始收摊';
   }
@@ -1008,7 +1112,7 @@ function createMarket(host, art) {
     ticket(bookButton,0,'#d4ad73');ticket(bookButton,3,'#294f44');
     label('选关账本',496,bookButton.y+bookButton.h/2,46,'#f9e6bd',true);
     ctx.restore();
-    label('已收摊  '+Object.keys(best).length+' / '+lastStage+'  关',496,1527,32,'#f1ddb3');
+    label('已收摊  '+completedCount()+' / '+lastStage+'  关',496,1527,32,'#f1ddb3');
   }
   function drawGrid() {
     const col='#79552a',d=14;
@@ -1095,7 +1199,7 @@ function createMarket(host, art) {
     ctx.fillStyle='rgba(20,39,30,.76)';ctx.fillRect(0,0,WIDTH,HEIGHT);
     paper(53,299,886,1122,'#9a6e43');paper(50,286,886,1123,'#f3dfb3');
     label('收摊账本',496,372,72,'#553c28',true);
-    label('已收摊 '+Object.keys(best).length+' / '+lastStage+'  ·  点关卡换新局',496,450,34,'#526347',true);
+    label('已收摊 '+completedCount()+' / '+lastStage+'  ·  点关卡换新局',496,450,34,'#526347',true);
     for(let n=1;n<=lastStage;n++){
       const b=ledgerSlot(n),item=level.stages[n],current=n===stage;
       paper(b.x,b.y,b.w,b.h,current?'#365d4c':'#e4c998');
@@ -1104,7 +1208,7 @@ function createMarket(host, art) {
       ctx.drawImage(img,b.x+61-iw/2,b.y+66-ih/2,iw,ih);
       ctx.save();ctx.textAlign='left';ctx.textBaseline='middle';
       ctx.fillStyle=current?'#f4e7c6':'#67543b';ctx.font='30px sans-serif';
-      ctx.fillText(level.stageName(n)+(best[n]?' · '+best[n]+' 步':''),b.x+122,b.y+39);
+      ctx.fillText(level.stageName(n)+(best[n]?' · '+best[n]+' 步':oldBest[n]?' · 已收摊':''),b.x+122,b.y+39);
       ctx.fillStyle=current?'#fff1ce':'#394a36';ctx.font='bold 43px sans-serif';
       ctx.fillText(item.title,b.x+120,b.y+88);ctx.restore();
     }
@@ -1146,7 +1250,7 @@ function createMarket(host, art) {
     const drag=gesture && gesture.dragging ? gesture : null;
     if(drag) {
       const target=dropTarget(drag);
-      if(target) highlight(box(target),level.canPlace(pieces,target,stage));
+      if(target) highlight(box(target),level.canMove(pieces,target,stage,sliding));
     } else if(selection && !won) {
       highlight(box(get(selection)),true);
     }
@@ -1178,7 +1282,7 @@ function createMarket(host, art) {
     if(won) {
       paper(99,235,794,96,'#f6e4b9');label(spec().finish,496,284,57,'#963f23',true);
       const receipt=stage===1?'西瓜、长葱、鸡蛋都装好了':stage===2?'鱼盘正好盖住冰垫，今晚的货齐了':
-        '本关 '+history.length+' 步  ·  最佳 '+best[stage]+' 步';
+        '本关 '+history.length+' 步  ·  最佳 '+((!sliding && level.slidingStage(stage)?oldBest:best)[stage]||history.length)+' 步';
       label(receipt,496,1334,43,'#ffebbc',true);
       button(commands.replay,'再摆一次');
       button(commands.advance,stage<lastStage?'去'+level.stageName(stage+1)+' ›':'收摊账本',true);
@@ -1194,7 +1298,7 @@ function createMarket(host, art) {
       button(commands.hint,'提示');button(commands.reset,'重摆');
       if(stage>=3){
         button(commands.undo,'撤一步');
-        if(!notice)label('轻点长方形食材转向',496,1247,32,'#fff0c7',true);
+        if(!notice)label(sliding?'筐内一次直挪一格 · 轻点长条转向':'轻点长方形食材转向',496,1247,32,'#fff0c7',true);
       }else label('轻点转向 · 拖动摆放',496,1527,35,'#ffebbc',true);
     }
     if(notice && now<notice.until && !won) {
@@ -1203,7 +1307,7 @@ function createMarket(host, art) {
     if(book)drawLedger();
   }
   function reset(nextStage=stage) {
-    home=false;hasStarted=true;stage=nextStage;const size=level.boardSize(stage);grid.cw=828/size;grid.ch=782/size;
+    home=false;hasStarted=true;stage=nextStage;sliding=level.slidingStage(stage);const size=level.boardSize(stage);grid.cw=828/size;grid.ch=782/size;
     clearTimeout(noticeTimer);
     draws[stage]=deals.draw(stage,draws[stage]);
     opening=deals.openingAt(stage,draws[stage].last);
@@ -1218,7 +1322,7 @@ function createMarket(host, art) {
     flight={id:piece.id,from,to:pose(piece),since:Date.now()};persist();say('已撤回上一步。');
   }
   function hint() {
-    const path=level.plan(pieces,stage);
+    const path=level.plan(pieces,stage,sliding);
     hintMark=path && path[0];
     if(!hintMark){say(stage>=3?'这步卡住了，撤一步再试。':'试试重摆，换一个开局。');return;}
     const name=names[hintMark.id];
@@ -1236,14 +1340,17 @@ function createMarket(host, art) {
     remember(at);
     flight={id:piece.id,from,to:pose(piece),since:Date.now()};
     selection=rotated?piece.id:null;notice=null;hintMark=null;
-    if(won){best[stage]=Math.min(best[stage]||Infinity,history.length);announce(spec().finish);}
+    if(won){
+      const records=level.slidingStage(stage)&&!sliding?oldBest:best;
+      records[stage]=Math.min(records[stage]||Infinity,history.length);announce(spec().finish);
+    }
     else if(packed)say(names[at.id]+'已装好，接着装'+names[pending().id]+'。');
     else if(rotated)say(names[piece.id]+'已'+(at.vertical?'竖放':'横放')+'，可拖动或点空位。');
     else announce(names[piece.id]+'已放好。');
     persist();redraw();
   }
   function turn(id) {
-    const piece=get(id),next=level.turnTarget(pieces,piece,stage);
+    const piece=get(id),next=level.turnTarget(pieces,piece,stage,sliding);
     if(next)move(next,pose(piece));
     else{selection=id;say('这里转不开，先挪一挪食材。');}
   }
@@ -1254,7 +1361,7 @@ function createMarket(host, art) {
     return piece && inRect(p,box(piece))?piece:null;
   }
   function showBook(){
-    book=true;gesture=null;selection=null;flight=null;announce('收摊账本，已收摊 '+Object.keys(best).length+' / '+lastStage+'。');redraw();
+    book=true;gesture=null;selection=null;flight=null;announce('收摊账本，已收摊 '+completedCount()+' / '+lastStage+'。');redraw();
   }
   function enterGame(){
     home=false;book=false;hasStarted=true;persist();
@@ -1335,23 +1442,24 @@ function createMarket(host, art) {
       }
     } else if(g.dragging) {
       const at=dropTarget(g);
-      if(at && level.canPlace(pieces,at,stage)) move(at,g.pose);
+      if(at && level.canMove(pieces,at,stage,sliding)) move(at,g.pose);
       else {
         flight={id:g.id,from:g.pose,to:pose(get(g.id)),since:Date.now()};
         const order=pending();
         if(at && stage>1 && g.id===order.id && at.vertical!==order.vertical)say('点一下'+names[g.id]+'，'+(order.vertical?'竖放':'横放')+'对齐描边格。');
         else if(at && stage===2 && g.id==='fish')say(at.col===order.col && at.row===order.row?'冰垫还没腾空，先挪开食材。':'鱼盘要盖在蓝色冰垫上。');
         else if(at && stage>=3 && g.id===order.id)say(at.col===order.col && at.row===order.row?'描边格还没腾空，先挪开食材。':'照着描边格放，四角要对齐。');
+        else if(at && sliding && get(g.id).col!==null && !level.oneCell(get(g.id),at))say('筐内一次只能上下左右挪一格。');
         else say(at?'这里已经有东西了，再换个位置。':'要放在竹筐里面。');
       }
     } else if(g.empty && selection) {
       const cell=cellAt(p);
       if(cell) {
         const piece=get(selection);
-        const at=level.legalOffers(pieces,piece,stage).find(item=>level.contains(item,cell.col,cell.row));
+        const at=level.legalOffers(pieces,piece,stage).find(item=>level.contains(item,cell.col,cell.row) && level.canMove(pieces,item,stage,sliding));
         if(at) move(at,pose(piece));
         else if(stage>1 && selection===pending().id && piece.vertical!==pending().vertical)say('点一下'+names[selection]+'，转到和描边格同向。');
-        else say('这个空位装不下，试试别处。');
+        else say(sliding && piece.col!==null?'请点食材旁边能挪进的空格。':'这个空位装不下，试试别处。');
       } else selection=null;
     } else if(g.id && level.canTurn(g.id)) turn(g.id);
     else if(g.id) {
